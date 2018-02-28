@@ -3,6 +3,7 @@ import functools
 import random
 import time
 from collections import namedtuple
+import weakref
 
 from py_zipkin.exception import ZipkinError
 from py_zipkin.logging_helper import zipkin_logger
@@ -96,6 +97,8 @@ class zipkin_span(object):
             do_stuff()
     """
 
+    span_id_to_handler = weakref.WeakValueDictionary()
+
     def __init__(
         self,
         service_name,
@@ -113,7 +116,8 @@ class zipkin_span(object):
         use_128bit_trace_id=False,
         host=None,
         context_stack=None,
-        firehose_handler=None
+        firehose_handler=None,
+        span_id_to_handler=None
     ):
         """Logs a zipkin span. If this is the root span, then a zipkin
         trace is started as well.
@@ -191,6 +195,8 @@ class zipkin_span(object):
         self._context_stack = context_stack
         if self._context_stack is None:
             self._context_stack = ThreadLocalStack()
+        if span_id_to_handler is not None:
+            self.span_id_to_handler = span_id_to_handler
 
         # Spans that log a 'cs' timestamp can additionally record
         # 'sa' binary annotations that show where the request is going.
@@ -306,13 +312,20 @@ class zipkin_span(object):
 
         self.start_timestamp = time.time()
 
+        self.log_handler = (
+            ZipkinLoggerHandler(self.zipkin_attrs)
+            if self.zipkin_attrs.parent_span_id not in self.span_id_to_handler
+            else self.span_id_to_handler[self.zipkin_attrs.parent_span_id]
+        )
+        self.span_id_to_handler[self.zipkin_attrs.span_id] = self.log_handler
+        self.logging_configured = True
+
         if self.perform_logging:
             # Don't set up any logging if we're not sampling
             if not self.zipkin_attrs.is_sampled and not self.firehose_handler:
                 return self
             endpoint = create_endpoint(self.port, self.service_name, self.host)
             client_context = set(self.include) == {'client'}
-            self.log_handler = ZipkinLoggerHandler(self.zipkin_attrs)
             self.logging_context = ZipkinLoggingContext(
                 self.zipkin_attrs,
                 endpoint,
@@ -327,31 +340,7 @@ class zipkin_span(object):
                 firehose_handler=self.firehose_handler,
             )
             self.logging_context.start()
-            self.logging_configured = True
-            return self
-        else:
-            # Patch the ZipkinLoggerHandler.
-            # Be defensive about logging setup. Since ZipkinAttrs are local to
-            # the thread, multithreaded frameworks can get in strange states.
-            # The logging is not going to be correct in these cases, so we set
-            # a flag that turns off logging on __exit__.
-            try:
-                # Assume there's only a single handler, since all logging
-                # should be set up in this package.
-                log_handler = zipkin_logger.handlers[0]
-            except IndexError:
-                return self
-            # Make sure it's not a NullHandler or something
-            if not isinstance(log_handler, ZipkinLoggerHandler):
-                return self
-            # Put span ID on logging handler.
-            self.log_handler = zipkin_logger.handlers[0]
-            # Store the old parent_span_id, probably None, in case we have
-            # nested zipkin_spans
-            self.old_parent_span_id = self.log_handler.parent_span_id
-            self.log_handler.parent_span_id = self.zipkin_attrs.span_id
-            self.logging_configured = True
-            return self
+        return self
 
     def __exit__(self, _exc_type, _exc_value, _exc_traceback):
         self.stop(_exc_type, _exc_value, _exc_traceback)
@@ -389,8 +378,6 @@ class zipkin_span(object):
         # zipkin_span).
         end_timestamp = time.time()
 
-        self.log_handler.parent_span_id = self.old_parent_span_id
-
         # We are simulating a full two-part span locally, so set cs=sr and ss=cr
         full_annotations = {
             'cs': self.start_timestamp,
@@ -413,6 +400,7 @@ class zipkin_span(object):
             binary_annotations=self.binary_annotations,
             sa_binary_annotations=self.sa_binary_annotations,
             span_id=self.zipkin_attrs.span_id,
+            parent_span_id=self.zipkin_attrs.parent_span_id
         )
 
     def update_binary_annotations(self, extra_annotations):

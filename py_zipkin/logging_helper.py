@@ -235,7 +235,7 @@ class ZipkinLoggerHandler(logging.StreamHandler, object):
         # where each additional client span logged has this span as its parent.
         # This is to allow logging of hierarchies of spans instead of just
         # single client spans. See the SpanContext class.
-        self.parent_span_id = None
+        self.parent_span_id = zipkin_attrs.parent_span_id
         self.zipkin_attrs = zipkin_attrs
         self.client_spans = []
         self.extra_annotations = []
@@ -248,6 +248,7 @@ class ZipkinLoggerHandler(logging.StreamHandler, object):
         binary_annotations,
         sa_binary_annotations=None,
         span_id=None,
+        parent_span_id=None,
     ):
         """Convenience method for storing a local child span (a zipkin_span
         inside other zipkin_spans) to be logged when the outermost zipkin_span
@@ -256,7 +257,7 @@ class ZipkinLoggerHandler(logging.StreamHandler, object):
         self.client_spans.append({
             'span_name': span_name,
             'service_name': service_name,
-            'parent_span_id': self.parent_span_id,
+            'parent_span_id': parent_span_id or self.parent_span_id,
             'span_id': span_id,
             'annotations': annotations,
             'binary_annotations': binary_annotations,
